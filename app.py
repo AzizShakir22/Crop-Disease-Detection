@@ -38,9 +38,14 @@ def load_model():
     )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    return model, class_names
+    
+    # --- NEW: Load Guard Model (Pre-trained on general objects) ---
+    guard = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
+    guard.eval()
+    
+    return model, class_names, guard
 
-model, class_names = load_model()
+model, class_names, guard_model = load_model()
 
 # Custom CSS for clean UI
 custom_css = """
@@ -104,6 +109,30 @@ def predict(image):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     img_tensor = transform(image).unsqueeze(0)
+    
+    # --- NEW: Guard AI Check ---
+    with torch.no_grad():
+        guard_out = guard_model(img_tensor)
+        guard_probs = F.softmax(guard_out, dim=1)[0]
+        
+    top1_guard_prob, top1_guard_id = torch.topk(guard_probs, 1)
+    guard_id = top1_guard_id.item()
+    guard_prob = top1_guard_prob.item()
+    
+    # --- Guard AI Rules ---
+    # 1. ImageNet is highly confident it's an animal or everyday artifact (NOT a plant)
+    # ImageNet Classes: 0-397 (Animals/People), 400-933 (Common objects/vehicles)
+    # Exempt classes: 580 (greenhouse), 738 (pot), 883 (vase)
+    is_confident_non_plant = (guard_prob > 0.4 and guard_id < 934 and guard_id not in [580, 738, 883])
+    
+    # 2. ImageNet is completely confused (Max confidence < 20%)
+    # This mathematically happens when you upload abstract art, logos (like the Asus ROG logo), or random noise.
+    is_abstract_or_noise = (guard_prob < 0.20)
+    
+    if is_confident_non_plant or is_abstract_or_noise:
+        error_html = "<div class='dashboard-card'><h2 style='margin:0; text-align: center; color: #d32f2f;'>❌ Image Rejected</h2><p style='text-align:center;'>This appears to be an animal, everyday object, logo, or abstract graphic—not a real plant leaf. Please upload a clear crop photo.</p></div>"
+        return error_html, "", "", "Upload a leaf to see treatment recommendations.", "Upload a leaf to see prevention tips.", {}
+    # ---------------------------
     
     with torch.no_grad():
         outputs = model(img_tensor)
