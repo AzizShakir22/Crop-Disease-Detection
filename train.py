@@ -3,6 +3,7 @@ import torch.nn as nn
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import os
 import time
 
 # ─── CONFIG ───────────────────────────────────────────
@@ -13,18 +14,21 @@ EPOCHS = 15
 NUM_CLASSES = 15
 LEARNING_RATE = 0.001
 MODEL_SAVE_PATH = 'crop_disease_model.pth'
+FULL_MODEL_PATH = 'crop_disease_full.pth'
 # ──────────────────────────────────────────────────────
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\n🚀 Using device: {device}")
-    print(f"🎮 GPU: {torch.cuda.get_device_name(0)}\n")
+    if torch.cuda.is_available():
+        print(f"🎮 GPU: {torch.cuda.get_device_name(0)}\n")
 
     train_transform = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.RandomRotation(20),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -44,18 +48,23 @@ def main():
 
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size]
+    )
 
-    # ✅ num_workers=0 fixes Windows multiprocessing error
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     print(f"🖼️  Training: {train_size} | Validation: {val_size}\n")
 
+    # ─── MODEL ────────────────────────────────────────
     model = models.mobilenet_v2(weights='IMAGENET1K_V1')
-    for param in model.features.parameters():
-        param.requires_grad = False
 
+    # Unfreeze ALL layers from the start
+    for param in model.parameters():
+        param.requires_grad = True
+
+    # Replace classifier
     model.classifier = nn.Sequential(
         nn.Dropout(0.4),
         nn.Linear(model.last_channel, 256),
@@ -64,11 +73,13 @@ def main():
         nn.Linear(256, NUM_CLASSES)
     )
     model = model.to(device)
-    print("✅ MobileNetV2 loaded\n")
+    print("✅ MobileNetV2 loaded — all layers trainable\n")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.classifier.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=3, factor=0.5
+    )
 
     train_accs, val_accs = [], []
     best_val_acc = 0.0
@@ -116,19 +127,26 @@ def main():
         val_accs.append(val_acc)
         scheduler.step(val_loss)
 
-        print(f"Epoch [{epoch+1:2d}/{EPOCHS}] | Train: {train_acc:.1f}% | Val: {val_acc:.1f}% | Loss: {val_loss:.4f} | {elapsed:.1f}s")
+        print(f"Epoch [{epoch+1:2d}/{EPOCHS}] | "
+              f"Train: {train_acc:.1f}% | "
+              f"Val: {val_acc:.1f}% | "
+              f"Loss: {val_loss:.4f} | "
+              f"{elapsed:.1f}s")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save({'model_state_dict': model.state_dict(), 'class_names': class_names}, MODEL_SAVE_PATH)
+            # Save state dict version
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'class_names': class_names,
+                'val_accuracy': val_acc,
+                'num_classes': NUM_CLASSES
+            }, MODEL_SAVE_PATH)
             print(f"  💾 Saved! Best Val Acc: {val_acc:.1f}%")
 
-    # Fine tuning
-    print("\n🔧 Fine-tuning last layers...")
-    for param in model.features[-5:].parameters():
-        param.requires_grad = True
-
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.0001)
+    # ─── FINE TUNING ──────────────────────────────────
+    print("\n🔧 Fine-tuning all layers...")
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
     for epoch in range(5):
         model.train()
@@ -159,25 +177,61 @@ def main():
 
         if ft_acc > best_val_acc:
             best_val_acc = ft_acc
-            torch.save({'model_state_dict': model.state_dict(), 'class_names': class_names}, MODEL_SAVE_PATH)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'class_names': class_names,
+                'val_accuracy': ft_acc,
+                'num_classes': NUM_CLASSES
+            }, MODEL_SAVE_PATH)
             print(f"  💾 New best: {ft_acc:.1f}%")
 
-    # Plot
+    # ─── FINAL SAVE BOTH FORMATS ──────────────────────
+    print("\n💾 Saving final complete models...")
+
+    # Make sure all params are included
+    for param in model.parameters():
+        param.requires_grad = True
+
+    # Format 1: Full model (larger, easier to load)
+    torch.save(model, FULL_MODEL_PATH)
+
+    # Format 2: State dict (smaller, more portable)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'class_names': class_names,
+        'val_accuracy': best_val_acc,
+        'num_classes': NUM_CLASSES
+    }, MODEL_SAVE_PATH)
+
+    # ─── VERIFY FILE SIZES ────────────────────────────
+    size_full  = os.path.getsize(FULL_MODEL_PATH) / (1024 * 1024)
+    size_state = os.path.getsize(MODEL_SAVE_PATH)  / (1024 * 1024)
+
+    print(f"\n📦 Full model  ({FULL_MODEL_PATH}):  {size_full:.1f} MB")
+    print(f"📦 State dict  ({MODEL_SAVE_PATH}): {size_state:.1f} MB")
+
+    if size_full > 30:
+        print("✅ Full model size looks correct!")
+    else:
+        print("⚠️  Full model still small — check training.")
+
+    # ─── PLOT ─────────────────────────────────────────
     plt.figure(figsize=(10, 4))
     plt.plot(train_accs, label='Train Accuracy')
-    plt.plot(val_accs, label='Val Accuracy')
+    plt.plot(val_accs,   label='Val Accuracy')
     plt.title('Training Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy (%)')
     plt.legend()
+    plt.tight_layout()
     plt.savefig('training_results.png')
     plt.show()
 
-    print(f"\n✅ Done! Best Accuracy: {best_val_acc:.1f}%")
-    print(f"💾 Model saved: {MODEL_SAVE_PATH}")
+    print(f"\n🏆 Best Validation Accuracy: {best_val_acc:.1f}%")
+    print(f"💾 Upload to Hugging Face → {FULL_MODEL_PATH}")
     print(f"📊 Graph saved: training_results.png")
 
 
-# ✅ Required for Windows multiprocessing
+# ✅ Required for Windows
 if __name__ == '__main__':
     main()

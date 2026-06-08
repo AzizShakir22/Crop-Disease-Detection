@@ -1,0 +1,21 @@
+Upload Leaf Image,Diagnosis,timestamp
+.gradio\flagged\Upload Leaf Image\699241fa9c3a2dc8d1a6\images.jpg,"# 🌿 Detection Result
+
+## Potato Early blight
+**Confidence:** 100.0%
+**Severity:** ⚠️ Moderate
+
+---
+
+### 💊 Treatment
+Apply chlorothalonil or mancozeb fungicides.
+
+### 🛡️ Prevention
+Ensure proper spacing for air circulation.
+
+---
+
+### 📊 Top 3 Predictions
+1. Potato Early blight — 100.0%
+2. Tomato Septoria leaf spot — 0.0%
+3. Potato Late blight — 0.0%",2026-06-08 11:55:25.747730
